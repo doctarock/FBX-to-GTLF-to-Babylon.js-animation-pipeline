@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FBX → Babylon One-Shot Pipeline</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #121212; color: #f5f5f5; margin: 24px; }
+    h1 { margin-top: 0; }
+    .card { background: #1d1d1d; border: 1px solid #333; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .drop { border: 2px dashed #666; border-radius: 12px; padding: 28px; text-align: center; background: #181818; cursor: pointer; }
+    .drop.dragover { border-color: #9ec5fe; background: #202020; }
+    button { padding: 10px 14px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; margin-right: 8px; }
+    #runBtn { background: #2979ff; color: white; }
+    #clearBtn { background: #666; color: white; }
+    #downloadLink { display: inline-block; margin-top: 12px; color: #9ec5fe; }
+    #log { white-space: pre-wrap; background: #101010; border: 1px solid #333; border-radius: 8px; padding: 12px; min-height: 220px; font-family: Consolas, monospace; font-size: 13px; overflow: auto; }
+    ul { margin-top: 12px; }
+    .small { color: #bbb; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>FBX → Babylon One-Shot Pipeline</h1>
+
+  <div class="card">
+    <div id="dropZone" class="drop">
+      Drop one or more <strong>.fbx</strong> files here
+      <div class="small" style="margin-top:8px;">This converts to GLB, extracts Babylon animation groups, and packages everything into one ZIP.</div>
+    </div>
+    <input id="fileInput" type="file" multiple accept=".fbx" style="display:none;" />
+    <ul id="fileList"></ul>
+    <div>
+      <button id="runBtn" disabled>Run One-Shot Pipeline</button>
+      <button id="clearBtn">Clear</button>
+    </div>
+    <a id="downloadLink" href="#" style="display:none;">Download final ZIP</a>
+  </div>
+
+  <div class="card">
+    <strong>Status</strong>
+    <div id="status" class="small">Checking backend...</div>
+  </div>
+
+  <div class="card">
+    <strong>Log</strong>
+    <div id="log"></div>
+  </div>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+  <script>
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("fileInput");
+    const fileList = document.getElementById("fileList");
+    const runBtn = document.getElementById("runBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const downloadLink = document.getElementById("downloadLink");
+    const statusEl = document.getElementById("status");
+    const logEl = document.getElementById("log");
+    let selectedFiles = [];
+
+    function log(msg) {
+      logEl.textContent += msg + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function renderFiles() {
+      fileList.innerHTML = "";
+      selectedFiles.forEach(file => {
+        const li = document.createElement("li");
+        li.textContent = `${file.name} (${Math.round(file.size / 1024)} KB)`;
+        fileList.appendChild(li);
+      });
+      runBtn.disabled = selectedFiles.length === 0;
+    }
+
+    function addFiles(files) {
+      const incoming = Array.from(files).filter(f => /\.fbx$/i.test(f.name));
+      if (!incoming.length) {
+        log("No .fbx files detected.");
+        return;
+      }
+      selectedFiles.push(...incoming);
+      renderFiles();
+      downloadLink.style.display = "none";
+      log(`Added ${incoming.length} file(s).`);
+    }
+
+    async function refreshHealth() {
+      try {
+        const res = await fetch("/api/health");
+        const data = await res.json();
+        statusEl.textContent = data.binaryConfigured
+          ? `Ready. Converter: ${data.binaryPath}`
+          : `Converter path not confirmed: ${data.binaryPath}`;
+      } catch {
+        statusEl.textContent = "Could not reach backend.";
+      }
+    }
+
+    function sanitizeBaseName(name) {
+      return name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9._-]+/g, "_");
+    }
+
+    async function extractAnimationGroups(assetUrl, sourceName) {
+      const engine = new BABYLON.NullEngine();
+      const scene = new BABYLON.Scene(engine);
+      const sourceBase = sanitizeBaseName(sourceName);
+
+      try {
+        log(`Loading converted GLB for extraction: ${sourceName}`);
+        await BABYLON.SceneLoader.AppendAsync("", assetUrl, scene);
+
+        const clips = [];
+        if (!scene.animationGroups.length) {
+          log(`  No animation groups found in ${sourceName}`);
+        } else {
+          for (const group of scene.animationGroups) {
+            const serialized = group.serialize();
+            const clipName = sanitizeBaseName(group.name || "animation");
+            const fileName = `${sourceBase}__${clipName}.anim.json`;
+            clips.push({
+              clip: group.name || "animation",
+              fileName,
+              targetedAnimations: group.targetedAnimations ? group.targetedAnimations.length : 0,
+              json: serialized
+            });
+            log(`  Extracted clip: ${group.name || "animation"}`);
+          }
+        }
+
+        scene.dispose();
+        engine.dispose();
+        return { source: sourceName, sourceBase, clips };
+      } catch (err) {
+        try { scene.dispose(); engine.dispose(); } catch {}
+        log(`  Extraction failed for ${sourceName}: ${err.message || err}`);
+        return { source: sourceName, sourceBase, error: String(err), clips: [] };
+      }
+    }
+
+    dropZone.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", e => addFiles(e.target.files));
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", e => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      addFiles(e.dataTransfer.files);
+    });
+
+    clearBtn.addEventListener("click", () => {
+      selectedFiles = [];
+      renderFiles();
+      logEl.textContent = "";
+      downloadLink.style.display = "none";
+    });
+
+    runBtn.addEventListener("click", async () => {
+      if (!selectedFiles.length) return;
+      runBtn.disabled = true;
+      downloadLink.style.display = "none";
+      log("Uploading FBX files and converting to GLB...");
+
+      try {
+        const form = new FormData();
+        for (const file of selectedFiles) form.append("files", file);
+
+        const convertRes = await fetch("/api/convert", { method: "POST", body: form });
+        const convertData = await convertRes.json();
+
+        if (!convertRes.ok || !convertData.ok) {
+          log("Conversion failed.");
+          log(JSON.stringify(convertData, null, 2));
+          runBtn.disabled = false;
+          return;
+        }
+
+        log("Conversion finished.");
+        const extracted = [];
+
+        for (const item of convertData.results) {
+          if (!item.ok || !item.assetUrl) {
+            log(`Skipping ${item.file}: conversion failed.`);
+            continue;
+          }
+          extracted.push(await extractAnimationGroups(item.assetUrl, item.file));
+        }
+
+        log("Finalizing package...");
+        const finalizeRes = await fetch(`/api/finalize/${convertData.batchId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ results: convertData.results, extracted })
+        });
+        const finalizeData = await finalizeRes.json();
+
+        if (!finalizeRes.ok || !finalizeData.ok) {
+          log("Finalize failed.");
+          log(JSON.stringify(finalizeData, null, 2));
+          runBtn.disabled = false;
+          return;
+        }
+
+        downloadLink.href = finalizeData.downloadUrl;
+        downloadLink.style.display = "inline-block";
+        downloadLink.textContent = "Download final Babylon animation ZIP";
+        log("Done.");
+      } catch (err) {
+        log("Pipeline failed: " + err.message);
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+
+    refreshHealth();
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "fbx-to-babylon-animation-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-shot FBX to GLB conversion and Babylon animation extraction tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}
